@@ -1,11 +1,14 @@
 import requests
 from bs4 import BeautifulSoup
+from pathlib import Path
 import json
 import time
 import re
 import sys
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import string
+from urllib.parse import urljoin
 
 HEADERS = {
     "User-Agent": (
@@ -15,34 +18,60 @@ HEADERS = {
     )
 }
 
-ALL_GAMES_URL = "https://steamunlocked.net/all-games/"
+ALL_GAMES_URL = "https://steamunlocked.org/all-games/"
 OUTPUT_FILE = "steamunlocked.json"
 MAX_WORKERS = 8       # concurrent requests to individual game pages
 REQUEST_DELAY = 0.3   # seconds between each request per thread
 
-
 def get_all_game_links():
-    """Fetch the full game list from the all-games page."""
-    print(f"[*] Fetching game list from {ALL_GAMES_URL} ...")
-    resp = requests.get(ALL_GAMES_URL, headers=HEADERS, timeout=30)
-    resp.raise_for_status()
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    game_list = soup.find("ul", id="game-list")
-    if not game_list:
-        print("[!] Could not find #game-list on the page. Site structure may have changed.")
-        sys.exit(1)
-
+    """Fetch game links from /#/ and /a/ through /z/ pages."""
+    base_url = ALL_GAMES_URL.rstrip("/")
     links = []
-    for a in game_list.find_all("a", class_="game-link"):
-        title = a.get_text(strip=True)
-        url = a.get("href", "").strip()
-        if title and url:
-            links.append({"title": title, "url": url})
+    seen_urls = set()
 
-    print(f"[*] Found {len(links)} games.")
+    page_extensions = ["0-9"] + list(string.ascii_lowercase)
+
+    for extension in page_extensions:
+        page_url = f"{base_url}/{extension}/"
+        label = "0-9" if extension == "0-9" else extension.upper()
+
+        print(f"[*] Fetching {page_url} ...")
+
+        try:
+            resp = requests.get(page_url, headers=HEADERS, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            print(f"  [!] Could not fetch {label}: {e}")
+            continue
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        game_list = soup.find("ul", id="game-list")
+
+        if not game_list:
+            print(f"  [!] No #game-list found for {label}; skipping.")
+            continue
+
+        page_count = 0
+
+        for a in game_list.find_all("a", class_="game-link"):
+            title = a.get_text(" ", strip=True)
+            href = a.get("href", "").strip()
+
+            if not title or not href:
+                continue
+
+            game_url = urljoin(page_url, href)
+
+            if game_url not in seen_urls:
+                links.append({"title": title, "url": game_url})
+                seen_urls.add(game_url)
+                page_count += 1
+
+        print(f"  [✓] {label}: found {page_count} new games")
+        time.sleep(REQUEST_DELAY)
+
+    print(f"[*] Found {len(links)} total unique games.")
     return links
-
 
 def parse_game_page(title, url):
     """Fetch an individual game page and extract size, date, and download URI."""
